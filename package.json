@@ -1,0 +1,10 @@
+{
+  "name": "care-rag",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {"dev": "vite --host 0.0.0.0 --port 5173", "backend": "python3 -m uvicorn backend.app:app --host 0.0.0.0 --port 8000", "build": "vite build", "preview": "vite preview --host 0.0.0.0"},
+  "dependencies": {"@vitejs/plugin-react": "latest", "vite": "latest", "typescript": "latest", "react": "latest", "react-dom": "latest", "lucide-react": "latest"},
+  "devDependencies": {}
+}

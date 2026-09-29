@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: care-rag-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: CARE_RAG_LLM_MODEL
+        value: gpt-4o-mini

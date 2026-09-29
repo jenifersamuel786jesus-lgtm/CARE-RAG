@@ -1,0 +1,7 @@
+care_rag.db
+node_modules
+dist
+.git
+.env
+__pycache__
+*.pyc
