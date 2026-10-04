@@ -1,5 +1,5 @@
 from __future__ import annotations
-import io, time
+import hashlib, io, re, time
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -21,7 +21,29 @@ SEED_DOCUMENTS={'Hadoop Fundamentals.pdf':[('1','Hadoop is an open-source framew
 class AskRequest(BaseModel):
     query:str=Field(min_length=1); candidate_pool:int=Field(default=10,ge=3,le=50); max_rounds:int=Field(default=3,ge=1,le=5); sufficiency_threshold:float=Field(default=.85,ge=.4,le=1)
 
-def make_chunk(name,page,text,index): return {'chunk_id':f'{Path(name).stem[:4].upper()}-{page}-{index:02d}','document_name':name,'page_number':page,'text':text}
+def make_chunk(name,page,text,index):
+    doc_key=hashlib.sha1(name.encode('utf-8')).hexdigest()[:8].upper()
+    return {'chunk_id':f'{doc_key}-{page}-{index:02d}','document_name':name,'page_number':page,'text':text.strip()}
+
+def split_text(text, max_words=140, overlap=24):
+    words=re.findall(r'\S+', text.strip())
+    if not words: return []
+    if len(words)<=max_words: return [' '.join(words)]
+    out=[]; start=0
+    while start<len(words):
+        end=min(len(words),start+max_words); out.append(' '.join(words[start:end]))
+        if end==len(words): break
+        start=max(start+1,end-overlap)
+    return out
+
+def build_chunks(name,pairs):
+    chunks=[]; seen=set(); index=1
+    for page,text in pairs:
+        for part in split_text(text):
+            normalized=re.sub(r'\s+',' ',part).strip().lower()
+            if len(normalized)<20 or normalized in seen: continue
+            seen.add(normalized); chunks.append(make_chunk(name,page,part,index)); index+=1
+    return chunks
 def rebuild_index():
     chunks=STORE.chunks(); texts=[c['text'] for c in chunks]
     if not texts: INDEX['vectorizer']=INDEX['matrix']=None; return
@@ -42,7 +64,7 @@ def run_retrieval(request:AskRequest):
     if not STORE.chunks(): raise HTTPException(400,'No processed evidence is available. Upload a document first.')
     started=time.perf_counter(); chunks=STORE.chunks(); trace=select(request.query.strip(),chunks,INDEX['vectorizer'],INDEX['matrix'],request.candidate_pool,request.max_rounds,request.sufficiency_threshold); answer,source=generate(request.query,trace['selected'],trace['sufficient']); trace.update(query=request.query.strip(),answer=answer,generation_source=source,context_tokens=len(' '.join(c['text'] for c in trace['selected']).split()),retrieval_latency_ms=round((time.perf_counter()-started)*1000,1)); STORE.save_trace(trace); STORE.add_query(request.query.strip(),len(trace['selected']),trace['evidence_coverage'],trace['retrieval_latency_ms'],trace['context_tokens']); return trace
 @app.on_event('startup')
-def startup(): add_seed_data(); rebuild_index()
+def startup(): STORE.normalize_chunk_ids(); add_seed_data(); rebuild_index()
 @app.get('/api/health')
 def health(): return {'status':'ok','service':'CARE-RAG','version':'2.0.0','persistent_storage':str(STORE.path)}
 @app.get('/api/stats')
@@ -52,11 +74,14 @@ def documents(): return STORE.documents()
 @app.post('/api/documents/upload')
 async def upload_documents(files:list[UploadFile]=File(...)):
     results=[]
+    pending=[]
+    existing_names={d['name'] for d in STORE.documents()}
+    incoming_names=set()
     for file in files:
         data=await file.read()
         if not data: raise HTTPException(400,f'{file.filename} is empty.')
         if len(data)>25*1024*1024: raise HTTPException(413,f'{file.filename} is larger than the 25 MB upload limit.')
-        if any(d['name']==file.filename for d in STORE.documents()): raise HTTPException(409,f'{file.filename} is already uploaded.')
+        if file.filename in existing_names or file.filename in incoming_names: raise HTTPException(409,f'{file.filename} is already uploaded or duplicated in this batch.')
         try:
             pairs=extract_upload(file.filename,data)
         except HTTPException:
@@ -64,7 +89,11 @@ async def upload_documents(files:list[UploadFile]=File(...)):
         except Exception as exc:
             raise HTTPException(422,f'Could not read {file.filename}. Check that it is a valid PDF, DOCX, or TXT file.') from exc
         if not pairs or not any(t.strip() for _,t in pairs): raise HTTPException(400,f'{file.filename} contains no extractable text.')
-        chunks=[make_chunk(file.filename,p,t,i) for i,(p,t) in enumerate(pairs,1)]; STORE.add_document(file.filename,Path(file.filename).suffix[1:].upper(),len(set(str(p) for p,_ in pairs)),chunks); results.append(next(d for d in STORE.documents() if d['name']==file.filename))
+        chunks=build_chunks(file.filename,pairs)
+        if not chunks: raise HTTPException(400,f'{file.filename} contains no usable text after chunking.')
+        pending.append((file.filename,Path(file.filename).suffix[1:].upper(),len(set(str(p) for p,_ in pairs)),chunks)); incoming_names.add(file.filename)
+    for name,doc_type,pages,chunks in pending:
+        STORE.add_document(name,doc_type,pages,chunks); results.append(next(d for d in STORE.documents() if d['name']==name))
     rebuild_index(); return {'documents':results}
 @app.delete('/api/documents/{name}')
 def delete_document(name:str):

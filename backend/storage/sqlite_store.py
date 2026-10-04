@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, sqlite3, time
+import hashlib, json, sqlite3, time
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parents[2] / 'care_rag.db'
@@ -35,6 +35,18 @@ class SQLiteStore:
         for r in rows:
             d=dict(r); d['page_number']=int(d['page_number']) if str(d['page_number']).isdigit() else d['page_number']; d['embedding']=json.loads(d['embedding']) if d['embedding'] else None; out.append(d)
         return out
+    def normalize_chunk_ids(self):
+        rows=self.conn.execute('SELECT chunk_id,document_name,page_number FROM chunks ORDER BY document_name,rowid').fetchall()
+        if not rows: return
+        mapping=[]; counters={}
+        for r in rows:
+            key=hashlib.sha1(r['document_name'].encode('utf-8')).hexdigest()[:8].upper()
+            counter=counters.get((r['document_name'],str(r['page_number'])),0)+1; counters[(r['document_name'],str(r['page_number']))]=counter
+            mapping.append((r['chunk_id'],f'{key}-{r["page_number"]}-{counter:02d}'))
+        if len({new for _,new in mapping}) != len(mapping): return
+        self.conn.executemany('UPDATE chunks SET chunk_id=? WHERE chunk_id=?', [(f'__migrate__{i}',old) for i,(old,_) in enumerate(mapping)])
+        self.conn.executemany('UPDATE chunks SET chunk_id=? WHERE chunk_id=?', [(new,f'__migrate__{i}') for i,(_,new) in enumerate(mapping)])
+        self.conn.commit()
     def update_embeddings(self, embeddings):
         self.conn.executemany('UPDATE chunks SET embedding=? WHERE chunk_id=?', [(json.dumps(vec), cid) for cid,vec in embeddings.items()]); self.conn.commit()
     def add_query(self, query, selected, coverage, latency, context_tokens):

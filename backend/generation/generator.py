@@ -2,8 +2,12 @@ from __future__ import annotations
 import json, os, re, urllib.request
 
 def extractive(query: str, chosen: list[dict], sufficient: bool) -> str:
-    if not sufficient or not chosen:
-        return 'This topic is not covered by the uploaded documents. Please upload a relevant document, then ask again.'
+    if not chosen:
+        return 'I could not find supporting evidence for this question in the uploaded documents. Please upload a relevant document, then ask again.'
+    if not sufficient:
+        prefix='I found only partial evidence in the uploaded documents. The points below are supported, but the evidence is not sufficient to answer every part of the question:\n'
+    else:
+        prefix=''
     stop_words = {'what', 'which', 'where', 'when', 'that', 'this', 'with', 'from', 'into', 'about', 'explain', 'compare', 'advantages', 'benefits'}
     query_lower = query.lower()
     def citation(chunk):
@@ -56,7 +60,7 @@ def extractive(query: str, chosen: list[dict], sufficient: bool) -> str:
             break
     if not points:
         return 'This topic is not covered clearly by the uploaded documents. Please upload a relevant document, then ask again.'
-    return 'Key points from the selected evidence:\n' + '\n'.join(points)
+    return prefix + 'Key points from the selected evidence:\n' + '\n'.join(points)
 
 def generate(query: str, chosen: list[dict], sufficient: bool) -> tuple[str, str]:
     fallback=extractive(query,chosen,sufficient)

@@ -1,12 +1,12 @@
 from __future__ import annotations
 import math, re
+from ..adaptive_retrieval.complexity import STOP, INTENT
 
 def relevant_ids(query: str, chunks: list[dict]) -> set[str]:
-    q=query.lower(); ids=set()
-    terms=[]
-    if 'hadoop' in q: terms += ['hadoop','distributed','hdfs']
-    if 'spark' in q: terms += ['spark','memory','iterative']
-    if any(x in q for x in ['advantage','benefit','why','scale']): terms += ['scale','cost','efficient','fault','memory']
+    q=query.lower(); ids=set(); terms=[]
+    for term in re.findall(r'\b[a-z][a-z0-9-]{2,}\b',q):
+        if term not in STOP and term not in INTENT: terms.append(term)
+    if any(x in q for x in ['advantage','benefit','why','scale']): terms += ['scale','cost','efficient','fault','memory','performance']
     if any(x in q for x in ['application','used','where','workload']): terms += ['application','pipeline','warehousing','analytics','workload']
     for c in chunks:
         if any(t in c['text'].lower() for t in terms): ids.add(c['chunk_id'])
