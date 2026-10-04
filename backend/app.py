@@ -11,6 +11,7 @@ from docx import Document as DocxDocument
 from sklearn.feature_extraction.text import TfidfVectorizer
 from .storage.sqlite_store import SQLiteStore
 from .adaptive_retrieval.selector import select
+from .adaptive_retrieval.relevance import rank as rank_chunks
 from .generation.generator import generate
 from .evaluation.metrics import relevant_ids, retrieval, answer_quality
 
@@ -105,7 +106,23 @@ def ask(request:AskRequest): return run_retrieval(request)
 def trace(): return STORE.last_trace() or {'candidates':[],'selected':[],'rejected':[]}
 @app.post('/api/evaluate')
 def evaluate(request:AskRequest):
-    trace=run_retrieval(request); allc=trace['candidates']; relevant=relevant_ids(request.query,STORE.chunks()); ranked=sorted(allc,key=lambda x:x['relevance'],reverse=True); fixed=ranked[:5]; similarity=ranked[:max(3,min(6,len(ranked)))]; methods=[]
-    for name,selected in [('Fixed Top-K',fixed),('Similarity Adaptive',similarity),('CARE-RAG',trace['selected'])]:
-        metrics={**retrieval(selected,ranked,relevant),**answer_quality(generate(request.query,selected,True)[0],selected,request.query)}; methods.append({'method':name,'selected_chunks':len(selected),'context_tokens':sum(len(c['text'].split()) for c in selected),'evidence_coverage':round(min(1,sum(c['evidence_contribution'] for c in selected)/max(1,len(trace['query_aspects']))),3),'redundancy':round(sum(c['redundancy'] for c in selected)/max(1,len(selected)),3),'retrieval_latency_ms':trace['retrieval_latency_ms'],'answer':generate(request.query,selected,True)[0],'sources':selected,'metrics':metrics})
+    trace_data=run_retrieval(request); chunks=STORE.chunks(); relevant=relevant_ids(request.query,chunks); methods=[]
+    # Build one complete relevance ranking for the evaluation. The previous implementation
+    # reused CARE-RAG's already-truncated candidate list, making Top-K and similarity
+    # adaptive identical to CARE-RAG and assigning every method the same latency.
+    def ranked_chunks():
+        started=time.perf_counter(); ranked_pairs=rank_chunks(INDEX['vectorizer'].transform([request.query]),INDEX['matrix'],len(chunks)); elapsed=round((time.perf_counter()-started)*1000,1)
+        ranked=[]
+        for idx,relevance in ranked_pairs:
+            ranked.append({**chunks[idx],'relevance':round(relevance,3),'selected':False,'redundancy':0.0,'information_gain':round(relevance,3),'evidence_contribution':0.0,'aspect':'Evaluation','reason':'Ranked for evaluation'})
+        return ranked,elapsed
+    ranked,rank_latency=ranked_chunks(); fixed=ranked[:min(5,len(ranked))]
+    top_score=ranked[0]['relevance'] if ranked else 0
+    similarity=[c for c in ranked if c['relevance'] >= max(.08,top_score*.55)][:min(6,len(ranked))]
+    strategy_data=[('Fixed Top-K',fixed,rank_latency),('Similarity Adaptive',similarity,rank_latency),('CARE-RAG',trace_data['selected'],trace_data['retrieval_latency_ms'])]
+    for name,selected,latency in strategy_data:
+        selected_ids={x['chunk_id'] for x in selected}; relevant_recall=round(len(selected_ids & relevant)/max(1,len(relevant)),3)
+        answer,source=generate(request.query,selected,bool(selected_ids & relevant));
+        metrics={**retrieval(selected,ranked,relevant),**answer_quality(answer,selected,request.query)}
+        methods.append({'method':name,'selected_chunks':len(selected),'context_tokens':sum(len(c['text'].split()) for c in selected),'evidence_coverage':relevant_recall,'redundancy':round(sum(c.get('redundancy',0) for c in selected)/max(1,len(selected)),3),'retrieval_latency_ms':latency,'generation_source':source,'answer':answer,'sources':selected,'metrics':metrics})
     return {'query':request.query,'relevant_chunk_count':len(relevant),'results':methods}
