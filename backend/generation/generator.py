@@ -8,12 +8,14 @@ def extractive(query: str, chosen: list[dict], sufficient: bool) -> str:
         prefix='I found only partial evidence in the uploaded documents. The points below are supported, but the evidence is not sufficient to answer every part of the question:\n'
     else:
         prefix=''
-    stop_words = {'what', 'which', 'where', 'when', 'that', 'this', 'with', 'from', 'into', 'about', 'explain', 'compare', 'advantages', 'benefits'}
+    stop_words = {'what', 'which', 'where', 'when', 'that', 'this', 'with', 'from', 'into', 'about', 'explain', 'compare', 'advantages', 'benefits', 'and', 'the', 'are', 'is'}
     query_lower = query.lower()
     def citation(chunk):
         return f"({chunk.get('document_name', 'uploaded document')}, p. {chunk.get('page_number', '—')})"
-    entity_terms = [term for term in ('hadoop', 'spark', 'mapreduce', 'kafka', 'nat') if term in query_lower]
-    query_terms = (set(re.findall(r'\b[a-z]{4,}\b', query_lower)) - stop_words) | set(entity_terms)
+    # Use the actual query vocabulary, not a fixed list of technologies. This keeps
+    # evidence for topics such as “distributed systems” when they are not hard-coded.
+    query_terms = set(re.findall(r'\b[a-z]{3,}\b', query_lower)) - stop_words
+    entity_terms = [term for term in query_terms if any(re.search(rf'\b{re.escape(term)}\b', c['text'].lower()) for c in chosen)]
     if 'advantage' in query_lower or 'benefit' in query_lower:
         query_terms.update({'scale', 'cost', 'fault', 'efficient', 'memory', 'performance'})
     if any(term in query_lower for term in ('application', 'used', 'where')):
@@ -30,8 +32,6 @@ def extractive(query: str, chosen: list[dict], sufficient: bool) -> str:
     scored = []
     for chunk in chosen:
         chunk_text = f"{chunk.get('document_name', '')} {chunk['text']}".lower()
-        if entity_terms and not any(term in chunk_text for term in entity_terms):
-            continue
         sentences = re.split(r'(?<=[.!?])\s+|\n+', chunk['text'].strip())
         for sentence in sentences:
             sentence = re.sub(r'^[-•▪\s]+', '', sentence).strip()
@@ -50,7 +50,13 @@ def extractive(query: str, chosen: list[dict], sufficient: bool) -> str:
     scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
     points = []
     seen = set()
-    for _, _, sentence, source in scored:
+    # First take the strongest sentence for each requested term. This prevents a
+    # high-scoring sentence about one topic from crowding out another selected topic.
+    ordered = []
+    for term in sorted(entity_terms, key=len, reverse=True):
+        ordered.extend(item for item in scored if re.search(rf'\b{re.escape(term)}\b', item[2].lower()))
+    ordered.extend(scored)
+    for _, _, sentence, source in ordered:
         normalized = sentence.lower()
         if normalized in seen:
             continue
